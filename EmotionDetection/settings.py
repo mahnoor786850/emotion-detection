@@ -124,7 +124,7 @@ STATIC_URL = 'static/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 MEDIA_URL = '/media/'
 
-MEDIA_FILE_PATH = 'F:/Bilquese-2024/Emotion Detection/emotion-detection'
+MEDIA_FILE_PATH = 'E:/FYP/emotion-detection'
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.0/ref/settings/#default-auto-field
