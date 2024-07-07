@@ -14,7 +14,7 @@ from nltk.stem import PorterStemmer
 from keras.models import load_model
 from tensorflow.keras.preprocessing.text import Tokenizer
 from tensorflow.keras.preprocessing.sequence import pad_sequences
-import random
+
 from keras.initializers import Orthogonal
 import cv2
 from PIL import Image
@@ -22,7 +22,11 @@ from tensorflow.keras.models import model_from_json
 
 from tensorflow.keras.preprocessing.image import load_img, img_to_array
 from tensorflow.keras.applications.efficientnet import preprocess_input
-import cv2
+
+import librosa
+from keras.initializers import Orthogonal
+from keras.layers import LSTM
+from sklearn.preprocessing import OneHotEncoder
 
 
 emotion_app_path = os.path.join(settings.BASE_DIR, 'find_emotions')
@@ -31,11 +35,25 @@ img_model_path = os.path.join(emotion_app_path, 'img_model.h5')
 csv_file_path = os.path.join(emotion_app_path, 'training.csv')
 face_detect_path = os.path.join(emotion_app_path, 'haarcascade_frontalface_default.xml')
 e_model_path = os.path.join(emotion_app_path, 'model3.h5')
-e_json_model_path = os.path.join(emotion_app_path, 'model.json')
 # csv_file_path = os.path.join(app_path, 'emotion.csv')
 
 text_labels_dict = {0: 'Sad', 1: 'Happy', 2: 'Love', 3: 'Anger', 4: 'Fear', 5: 'Surprise'}
 img_class_labels = ['Anger', 'Disgust', 'Fear', 'Happy', 'Pain', 'Sad']
+
+encoder = OneHotEncoder()
+labels = ['female_neutral', 'female_happy', 'female_sad', 'female_angry', 'female_fear', 'female_disgust', 'female_surprise',
+          'male_neutral', 'male_happy', 'male_sad', 'male_angry', 'male_fear', 'male_disgust', 'male_surprise']
+encoder.fit(np.array(labels).reshape(-1, 1))
+
+
+class CustomLSTM(LSTM):
+    def __init__(self, *args, **kwargs):
+        kwargs.pop('time_major', None)
+        super().__init__(*args, **kwargs)
+
+
+custom_objects = {'Orthogonal': Orthogonal, 'LSTM': CustomLSTM}
+model = load_model(e_model_path, custom_objects=custom_objects)
 
 stemmer = PorterStemmer()
 
@@ -57,7 +75,7 @@ def detect_human_face(image_path):
     image_np = np.array(image)
     gray_image = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
     faces = face_cascade.detectMultiScale(gray_image, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-    return  False if len(faces) == 0 else True
+    return False if len(faces) == 0 else True
 
 
 def preprocess_text(text, tokenizer, max_len):
@@ -122,33 +140,64 @@ def detect_text_emotion(request):
     return Response(api_response_dic)
 
 
+def noise(data):
+    noise_amp = 0.035 * np.random.uniform() * np.amax(data)
+    data = data + noise_amp * np.random.normal(size=data.shape[0])
+    return data
+
+
+def stretch(data, rate=0.8):
+    return librosa.effects.time_stretch(y=data, rate=rate)
+
+
+def shift(data):
+    shift_range = int(np.random.uniform(low=-5, high=5) * 1000)
+    return np.roll(data, shift_range)
+
+
+def pitch(data, sampling_rate, pitch_factor=0.7):
+    n_steps = int(pitch_factor * sampling_rate / 512)
+    return librosa.effects.pitch_shift(data, sr=sampling_rate, n_steps=n_steps)
+
+
+def feat_ext(data, sample_rate):
+    mfcc = np.mean(librosa.feature.mfcc(y=data, sr=sample_rate).T, axis=0)
+    return mfcc
+
+
+def get_feat(path):
+    data, sample_rate = librosa.load(path, duration=2.5, offset=0.6)
+    res1 = feat_ext(data, sample_rate)
+    result = np.array(res1)
+    noise_data = noise(data)
+    res2 = feat_ext(noise_data, sample_rate)
+    result = np.vstack((result, res2))
+    new_data = stretch(data)
+    data_stretch_pitch = pitch(new_data, sample_rate)
+    res3 = feat_ext(data_stretch_pitch, sample_rate)
+    result = np.vstack((result, res3))
+    return result
+
+
 @api_view(['POST'])
 def detect_voice_emotion(request):
-    img_file = request.FILES.get('source_voice')
-    print(img_file)
     fss = FileSystemStorage()
     file = fss.save(request.FILES.get('source_voice').name, request.FILES.get('source_voice'))
     file_url = fss.url(file)
     complete_path = settings.MEDIA_FILE_PATH + file_url
 
-    live_predict = check_model_result(complete_path)
-    print(live_predict)
-    results = live_predict.split('_')
-    data = {'gender': results[0].lower(), 'emotion': results[1].lower()}
-    print(results[1].lower())
+    features = get_feat(complete_path)
+    X_new = np.expand_dims(features, axis=2)
+    predictions = model.predict(X_new)
+    predicted_labels = encoder.inverse_transform(predictions)
 
     api_response_dic = {
-        'emotion': results[1].lower()
+        'emotion': str(predicted_labels[0]).split('_')[1].split("'")[0].title()
     }
     return Response(api_response_dic)
 
 
 def check_model_result(test_file_path):
-    json_file = open(e_json_model_path, 'r')
-    loaded_model_json = json_file.read()
-    json_file.close()
-    loaded_model = model_from_json(loaded_model_json)
-    loaded_model.load_weights(e_model_path)
 
     X, sample_rate = librosa.load(test_file_path, res_type='kaiser_fast', duration=2.5, sr=22050 * 2, offset=0.5)
     sample_rate = np.array(sample_rate)
